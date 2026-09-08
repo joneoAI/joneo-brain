@@ -12,6 +12,20 @@ Supabase est le dépôt unique de tous les contenus. Toute la logique éditorial
 
 L'orchestration se fait par les statuts. Chaque agent lit les lignes dans l'état qui le concerne, agit, écrit le nouvel état. Aucun agent n'en appelle un autre. C'est la base qui orchestre.
 
+## Conventions de nommage
+
+**snake_case**, sans exception. Postgres met en minuscules ce qui n'est pas entre guillemets : `datePublication` devient `datepublication`. Le camelCase obligerait à des guillemets dans toutes les requêtes et dans Make.
+
+**Pas d'accents** dans les noms de colonnes. `duree`, pas `durée`. Les accents passent en Postgres mais posent problème dans les outils tiers, Make compris.
+
+**Pas de préfixe de table.** `titre` dans `episodes`, pas `episode_titre`. La désambiguïsation se fait par `episodes.titre` ou par alias dans les vues.
+
+**Exception, les clés étrangères** : `podcast_id` dans `episodes`. Convention établie et lisible.
+
+**Français pour l'éditorial, anglais pour la technique.** `titre`, `corps`, `resume`, `impacts`, `acteurs`, `statut`, `tags` d'un côté. `ghost_id`, `castos_id`, `created_at`, `published_at` de l'autre. La frontière est lisible : le français désigne ce qui est écrit, l'anglais ce que la machine gère.
+
+**Pas d'underscore initial** pour marquer le technique. Il est réservé par convention aux objets système Postgres. Les identifiants externes se préfixent par leur système : `ghost_id`, `castos_id`, `bunny_url`, `elevenlabs_voice_id`. C'est plus informatif qu'un underscore.
+
 ## Le modèle de données
 
 Deux natures d'objets, à ne pas confondre.
@@ -24,7 +38,7 @@ Deux natures d'objets, à ne pas confondre.
 
 L'agent de veille lit ses sources, qualifie, et écrit directement dans la bonne table. Pas d'entrepôt intermédiaire, pas de tri différé. Ce qui est du bruit n'est écrit nulle part.
 
-`actus` — ce qui relève de l'actualité et sera publié sur joneo.ai. C'est une table de contenu, pas d'origine.
+`actus` — ce qui relève de l'actualité et sera publié sur joneo.ai. Table de contenu, pas d'origine.
 
 `signaux` — ce qui relève du signal, c'est-à-dire ce qui pourrait se passer. Reste en réserve, alimente le fil d'épisodes.
 
@@ -40,11 +54,19 @@ Un signal n'est pas toujours collecté. Il peut être déduit en relisant plusie
 
 `sujets_expert` — la réserve de sujets d'articles personnels, alimentée à la main.
 
-### Les tables de contenu
+### Podcasts et épisodes
 
-`actus` — texte, publié sur joneo.ai. Titre, corps, tags, URL de publication.
+Deux tables distinctes. Un podcast est une entité, pas un tag : il porte un flux RSS Castos, une voix ElevenLabs, une catégorie Apple, une cover art et une ligne éditoriale propre. Aucun tag Ghost ne peut porter ça.
 
-`episodes` — podcasts, fil et Fondamentaux. Script, durée, voix, URL du fichier, identifiants Castos et Ghost, tags. Un champ distingue les deux formats, qui partagent la chaîne de production audio.
+`podcasts` — le show. Titre, sous-titre, teaser, description, famille, format (fil ou fondamentaux), voix, visibilité, `castos_id`, `castos_rss_url`, `categorie_apple`, `show_type`, cover, SEO, statut.
+
+`episodes` — rattaché à un podcast par `podcast_id`. Script, numéro, duree, URL du fichier, `castos_id`, `ghost_id`, tags, statut, date de publication prévue.
+
+Cette séparation rend la solution évolutive : ajouter un podcast est une ligne, pas une refonte.
+
+**Prérequis** : un épisode ne peut pas se publier tant que son podcast n'existe pas côté Castos. Un workflow Make dédié crée le show, récupère `castos_id` et `castos_rss_url`, crée la page Ghost, écrit les identifiants en base. Acte rare, quelques fois par an.
+
+### Les autres tables de contenu
 
 `nuances` — avec sa table fille `nuance_positions` : une ligne par IA participante, avec le modèle, la thèse défendue, le texte, l'ordre de passage, la voix. C'est ce qui permet de boucler pour produire l'audio.
 
@@ -54,9 +76,19 @@ Un signal n'est pas toujours collecté. Il peut être déduit en relisant plusie
 
 ### Tables techniques
 
-`formats` — la configuration : voix, template, destination, canal par défaut. Remplace l'ancienne base technique Notion.
+`formats` — la configuration : template, destination, canal par défaut.
 
 `journal` — en ajout seul, alimenté par trigger.
+
+### Les jointures remplacent les rollups
+
+Aucun champ rollup. Un rollup Notion contourne l'absence de jointure ; Postgres en a nativement.
+
+Une vue SQL, par exemple `episodes_complets`, joint `episodes` et `podcasts` et expose côté épisode le nom du podcast, la voix, le `castos_id`, le RSS, la famille. Make lit cette vue en un seul appel, comme aujourd'hui avec les rollups.
+
+Avantage : la donnée n'est jamais dupliquée. Changer la voix d'un podcast se répercute immédiatement sur tous ses épisodes. Ajouter une information à exposer, c'est une colonne dans la vue, pas un champ dans la table.
+
+Une vue est en lecture seule : lecture dans la vue, écriture dans les tables sous-jacentes.
 
 ### Les liens
 
@@ -66,15 +98,17 @@ Ce qui a déjà servi se lit dans ces liens, jamais dans un statut. Ne pas crée
 
 ## Les statuts
 
-**`signaux`** — `réserve`, `écarté`. Un signal reste disponible indéfiniment et peut alimenter plusieurs contenus.
+**`signaux`** — `reserve`, `ecarte`. Un signal reste disponible indéfiniment et peut alimenter plusieurs contenus.
 
-**`nuance_questions`, `concepts`, `sujets_expert`** — `réserve`, `écarté`. Une question déjà traitée reste sélectionnable : elle peut être rejouée plus tard, quand l'actualité l'a fait bouger. Un champ `dernière_utilisation`, mis à jour par trigger, permet de voir d'un coup d'œil ce qui a déjà été joué et depuis quand.
+**`nuance_questions`, `concepts`, `sujets_expert`** — `reserve`, `ecarte`. Une question déjà traitée reste sélectionnable : elle peut être rejouée plus tard, quand l'actualité l'a fait bouger. Un champ `derniere_utilisation`, mis à jour par trigger, permet de voir d'un coup d'œil ce qui a déjà été joué et depuis quand.
 
-**`actus`** — `rédigé`, `publié`. Régime automatique, pas d'arrêt.
+**`podcasts`** — `a_creer`, `cree`, `a_mettre_a_jour`. Machine à états de la création du show.
 
-**`episodes`, `nuances`, `articles_expert`** — `à produire`, `rédigé`, `validé`, `produit`, `publié`. La distinction entre `validé` et `produit` sépare le geste de relecture de la fabrication technique, qui peut échouer et être relancée sans revalidation.
+**`actus`** — `redige`, `publie`. Régime automatique, pas d'arrêt.
 
-**`publications_sociales`** — `rédigé`, `validé`, `diffusé`.
+**`episodes`, `nuances`, `articles_expert`** — `a_produire`, `redige`, `valide`, `produit`, `publie`. La distinction entre `valide` et `produit` sépare le geste de relecture de la fabrication technique, qui peut échouer et être relancée sans revalidation.
+
+**`publications_sociales`** — `redige`, `valide`, `diffuse`.
 
 Un champ `verrou` séparé marque une ligne prise par un scénario, sans polluer la liste des statuts métier. Sans lui, un select planifié traite deux fois la même ligne.
 
@@ -82,7 +116,7 @@ Ces listes seront ajustées après les premiers contenus réels.
 
 ## La publication planifiée
 
-Un champ `date_publication_prévue` sur la ligne. Le statut autorise la publication, la date la déclenche.
+Un champ `date_publication_prevue` sur la ligne. Le statut autorise la publication, la date la déclenche.
 
 Le select planifié cherche les lignes validées dont la date est atteinte. Une ligne sans date part immédiatement.
 
@@ -92,9 +126,9 @@ Même mécanisme partout. Pour les publications sociales, ça permet de prépare
 
 Le format porte le régime.
 
-Actus 360 est automatique : de `rédigé` à `publié` sans arrêt.
+Actus 360 est automatique : de `redige` à `publie` sans arrêt.
 
-Les épisodes, les Nuance et les articles expert s'arrêtent à `rédigé` et attendent la relecture.
+Les épisodes, les Nuance et les articles expert s'arrêtent à `redige` et attendent la relecture.
 
 ## Les agents
 
@@ -104,7 +138,7 @@ Trois natures, selon la tâche.
 
 **Agents Make.** Les Make AI Agents : un LLM avec des instructions en français et des outils. Le veilleur, le rédacteur des cas automatiques, l'agent social. Ils tournent sans intervention. Les outils sont des modules directs ou des outils MCP, sans construire de scénario.
 
-**Workflows Make.** Sans IA. Publication Ghost, image, audio. Ils ne décident de rien, ils exécutent.
+**Workflows Make.** Sans IA. Création de podcast, publication Ghost, image, audio. Ils ne décident de rien, ils exécutent.
 
 Un agent dédié pour les articles expert, avec un prompt qui porte la voix personnelle d'Alain et non celle de JONEO. C'est la raison de le séparer : ce n'est pas le même auteur.
 
@@ -128,7 +162,7 @@ Deux gestes différents, deux endroits.
 
 Directus a été envisagé puis écarté. Directus Cloud ne peut pas se connecter à une base Supabase externe, seul l'auto-hébergement le permet, ce qui ajoute un serveur à maintenir pour un gain marginal.
 
-## L'observabilité
+## L'observabilité éditoriale
 
 Table `journal` en ajout seul, alimentée par un trigger Postgres sur les tables de contenu. À chaque changement de statut : horodatage, acteur, action, objet, statut avant, statut après, contexte.
 
@@ -136,15 +170,27 @@ L'avantage du trigger : personne ne peut oublier de logger.
 
 Chaque agent a son propre rôle Postgres, cantonné à ce qu'il écrit. Le trigger capte l'identité de l'acteur sans que l'agent la déclare. Un agent ne peut pas mentir sur son identité. L'agent JONEO ne doit pas pouvoir écrire sous la signature d'Alain, et inversement.
 
-Second niveau, écrit par les agents eux-mêmes : modèle utilisé, tokens, outils appelés, éléments traités et rejetés, justification des décisions.
-
 Alerte quotidienne : un select planifié qui cherche les lignes bloquées dans un statut intermédiaire depuis plusieurs heures.
 
 Ce triptyque reprend les principes de sécurité des agents publiés par Google : contrôleur humain, pouvoirs limités, actions observables.
 
+## L'observabilité des coûts LLM
+
+Tous les appels LLM des agents Make passent par Helicone, en proxy.
+
+Helicone fournit le suivi technique : modèle, tokens, latence, coût par appel. Aucune structure à prévoir dans Supabase, et les agents n'écrivent pas leurs tokens en base.
+
+**Convention obligatoire** : chaque appel porte en métadonnée l'identifiant de la ligne Supabase concernée et le type de contenu. Sans ça, impossible de reconstituer un coût par contenu, puisqu'un Nuance consomme un appel par position plus un pour la synthèse.
+
+Cette donnée est celle qui permettra de vérifier que le modèle économique tient au prix d'abonnement visé.
+
+Répartition : Helicone pour le coût technique, le journal Supabase pour les décisions éditoriales.
+
 ## Configuration technique
 
-Ce qui dépend du format va dans `formats` : voix, template, destination, canal par défaut.
+Ce qui dépend du podcast va dans `podcasts` : voix, cover, RSS, catégorie, visibilité.
+
+Ce qui dépend du format va dans `formats` : template, destination, canal par défaut.
 
 Ce qui dépend de la ligne va sur la ligne : URL du fichier, identifiants de publication, dates. Écrit par Make, jamais à la main.
 
