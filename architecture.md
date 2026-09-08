@@ -2,7 +2,7 @@
 
 # JONEO — Architecture de production
 
-7 septembre 2026
+8 septembre 2026
 
 ## Le principe
 
@@ -20,11 +20,25 @@ L'orchestration se fait par les statuts. Chaque agent lit les lignes dans l'éta
 
 **Pas de préfixe de table.** `titre` dans `episodes`, pas `episode_titre`. La désambiguïsation se fait par `episodes.titre` ou par alias dans les vues.
 
-**Exception, les clés étrangères** : `podcast_id` dans `episodes`. Convention établie et lisible.
+**Exception, les clés étrangères** : `podcast_id` dans `episodes`.
 
-**Français pour l'éditorial, anglais pour la technique.** `titre`, `corps`, `resume`, `impacts`, `acteurs`, `statut`, `tags` d'un côté. `ghost_id`, `castos_id`, `created_at`, `published_at` de l'autre. La frontière est lisible : le français désigne ce qui est écrit, l'anglais ce que la machine gère.
+**Français pour l'éditorial, anglais pour la technique.** `titre`, `resume`, `impacts`, `statut` d'un côté. `ghost_id`, `castos_id`, `created_at`, `published_at` de l'autre.
 
-**Pas d'underscore initial** pour marquer le technique. Il est réservé par convention aux objets système Postgres. Les identifiants externes se préfixent par leur système : `ghost_id`, `castos_id`, `bunny_url`, `elevenlabs_voice_id`. C'est plus informatif qu'un underscore.
+**Pas d'underscore initial** pour marquer le technique. Il est réservé aux objets système Postgres. Les identifiants externes se préfixent par leur système : `ghost_id`, `castos_id`, `bunny_url`, `elevenlabs_voice_id`.
+
+## Les deux questions, les deux agents de veille
+
+C'est la distinction structurante de tout l'amont.
+
+**Le veilleur** demande : qu'est-ce qui s'est passé ces dernières vingt-quatre heures. Quotidien. Il écrit dans `actus`.
+
+**Le prospectif** demande : qu'est-ce qui commence à devenir observable, et que faudrait-il voir ensuite pour le prendre au sérieux. Hebdomadaire. Il écrit dans `signaux`.
+
+Les deux cherchent sur le web. Ce qui les distingue n'est pas la source mais la question posée, donc les requêtes, les critères de sélection et le rythme.
+
+Deux agents séparés, pour trois raisons. Les questions prospectives évoluent dans le temps, et ne doivent pas obliger à modifier l'agent qui produit les actus. Un agent quotidien qui cherche des signaux en fabriquera pour remplir. Et un signal se déduit sur des semaines, pas sur une journée.
+
+L'archive n'est pas la source du prospectif, elle est sa mémoire : il consulte `actus` et `signaux` en fin de course, pour ne pas répéter un signal déjà écrit et pour vérifier si un indice nouveau confirme ou fragilise un signal existant.
 
 ## Le modèle de données
 
@@ -36,15 +50,23 @@ Deux natures d'objets, à ne pas confondre.
 
 ### La veille
 
-L'agent de veille lit ses sources, qualifie, et écrit directement dans la bonne table. Pas d'entrepôt intermédiaire, pas de tri différé. Ce qui est du bruit n'est écrit nulle part.
+Chaque agent qualifie au moment où il collecte et écrit directement dans sa table. Pas d'entrepôt intermédiaire, pas de tri différé. Ce qui est du bruit n'est écrit nulle part.
 
-`actus` — ce qui relève de l'actualité et sera publié sur joneo.ai. Table de contenu, pas d'origine.
+Pas de table de dédoublonnage non plus. Un agent conversationnel produit une synthèse, pas une liste d'items bruts : le recoupement se fait à l'intérieur d'une exécution, c'est son travail. Entre exécutions, la lecture des contenus récents suffit.
 
-`signaux` — ce qui relève du signal, c'est-à-dire ce qui pourrait se passer. Reste en réserve, alimente le fil d'épisodes.
+`actus` — ce qui s'est passé, publié sur joneo.ai. Table de contenu, pas d'origine.
 
-Un signal n'est pas toujours collecté. Il peut être déduit en relisant plusieurs actus : trois annonces qui racontent la même bascule. Reste à trancher si c'est le veilleur quotidien ou un agent d'exploitation qui écrit ces signaux déduits.
+`signaux` — une ligne par **indice observable**, daté, rattaché à une **question prospective**. Plusieurs lignes par question dans le temps racontent son évolution : un indice en septembre, un autre en novembre, la question progresse. Reste en réserve indéfiniment, alimente le fil d'épisodes.
 
-`vus` — table technique de dédoublonnage. URL, empreinte, embedding. Aucune logique éditoriale, jamais consultée à la main. Remplace le Data Store Make actuel, en plus fin, et permet de comparer un nouvel item à tout ce qui a déjà été traité, y compris ce qui a été écarté.
+Un signal n'est pas une tendance déjà nommée. Si le sujet peut se dire en reprenant un terme du discours ambiant, ce n'est plus un signal, c'est du mainstream. La colonne `maturite` n'accepte que `faible` et `emergent`.
+
+Trois règles portées par la structure de la table.
+
+Le fait et l'interprétation sont dans deux colonnes distinctes. Une annonce de laboratoire ne vaut pas une évaluation indépendante.
+
+Le contre-indice est obligatoire. Sans lui, la veille devient un moulin à confirmations : un agent laissé libre confirme toujours ce qu'il cherche.
+
+Le prochain indice à surveiller transforme le signal en enquête ouverte plutôt qu'en constat.
 
 ### Les autres origines
 
@@ -84,7 +106,7 @@ Cette séparation rend la solution évolutive : ajouter un podcast est une ligne
 
 Aucun champ rollup. Un rollup Notion contourne l'absence de jointure ; Postgres en a nativement.
 
-Une vue SQL, par exemple `episodes_complets`, joint `episodes` et `podcasts` et expose côté épisode le nom du podcast, la voix, le `castos_id`, le RSS, la famille. Make lit cette vue en un seul appel, comme aujourd'hui avec les rollups.
+Une vue SQL, par exemple `episodes_complets`, joint `episodes` et `podcasts` et expose côté épisode le nom du podcast, la voix, le `castos_id`, le RSS, la famille. Make lit cette vue en un seul appel.
 
 Avantage : la donnée n'est jamais dupliquée. Changer la voix d'un podcast se répercute immédiatement sur tous ses épisodes. Ajouter une information à exposer, c'est une colonne dans la vue, pas un champ dans la table.
 
@@ -92,15 +114,15 @@ Une vue est en lecture seule : lecture dans la vue, écriture dans les tables so
 
 ### Les liens
 
-Un épisode du fil référence le ou les signaux qui l'ont déclenché. Un Nuance référence une question, et éventuellement un signal quand une actualité l'a réveillée. Un article expert référence un sujet, ou un contenu JONEO qu'il prolonge.
+Un épisode du fil référence le ou les indices qui l'ont déclenché. Un Nuance référence une question, et éventuellement un indice quand une actualité l'a réveillée. Un article expert référence un sujet, ou un contenu JONEO qu'il prolonge.
 
 Ce qui a déjà servi se lit dans ces liens, jamais dans un statut. Ne pas créer de statut pour une information qu'une relation exprime déjà.
 
 ## Les statuts
 
-**`signaux`** — `reserve`, `ecarte`. Un signal reste disponible indéfiniment et peut alimenter plusieurs contenus.
+**`signaux`** — `reserve`, `ecarte`. Un indice reste disponible indéfiniment et peut alimenter plusieurs contenus.
 
-**`nuance_questions`, `concepts`, `sujets_expert`** — `reserve`, `ecarte`. Une question déjà traitée reste sélectionnable : elle peut être rejouée plus tard, quand l'actualité l'a fait bouger. Un champ `derniere_utilisation`, mis à jour par trigger, permet de voir d'un coup d'œil ce qui a déjà été joué et depuis quand.
+**`nuance_questions`, `concepts`, `sujets_expert`** — `reserve`, `ecarte`. Une question déjà traitée reste sélectionnable : elle peut être rejouée plus tard, quand l'actualité l'a fait bouger. Un champ `derniere_utilisation`, mis à jour par trigger, permet de voir ce qui a déjà été joué et depuis quand.
 
 **`podcasts`** — `a_creer`, `cree`, `a_mettre_a_jour`. Machine à états de la création du show.
 
@@ -134,13 +156,25 @@ Les épisodes, les Nuance et les articles expert s'arrêtent à `redige` et atte
 
 Trois natures, selon la tâche.
 
-**Agents conversationnels planifiés.** Claude ou ChatGPT, connectés à Supabase, dans un projet. Ils lisent la base et interagissent avec Alain. Ils peuvent être planifiés, mais leur intérêt est l'échange : discuter un angle, ajuster, valider. C'est l'agent éditorial.
+**Agents conversationnels planifiés.** Claude ou ChatGPT, connectés à Supabase et à Feeder par MCP. Le veilleur et le prospectif sont de cette nature : ils cherchent sur le web, qualifient, et écrivent en base. L'agent éditorial l'est aussi, mais son intérêt est l'échange plutôt que la planification.
 
-**Agents Make.** Les Make AI Agents : un LLM avec des instructions en français et des outils. Le veilleur, le rédacteur des cas automatiques, l'agent social. Ils tournent sans intervention. Les outils sont des modules directs ou des outils MCP, sans construire de scénario.
+**Agents Make.** Les Make AI Agents : un LLM avec des instructions en français et des outils. Le rédacteur des cas automatiques, l'agent social. Les outils sont des modules directs ou des outils MCP, sans construire de scénario.
 
 **Workflows Make.** Sans IA. Création de podcast, publication Ghost, image, audio. Ils ne décident de rien, ils exécutent.
 
 Un agent dédié pour les articles expert, avec un prompt qui porte la voix personnelle d'Alain et non celle de JONEO. C'est la raison de le séparer : ce n'est pas le même auteur.
+
+**Convention de nommage des scénarios Make** : `AGENT` pour ce qui décide, `WF` pour ce qui exécute, `TOOL` pour ce qui sert un agent, `CRON` pour ce qui déclenche. Le nom dit ce que le scénario fait, jamais quand il tourne. Le dossier porte le domaine.
+
+## Feeder, la source choisie
+
+Feeder expose un serveur MCP hébergé, connecté en OAuth. L'agent peut lister les flux et dossiers, tirer les articles récents, filtrer sur les non lus, ouvrir le texte complet, et faire une recherche plein texte sur tout l'archive avec plage de dates.
+
+Ordre de collecte pour le veilleur : recherche web large sur le spectre 360 d'abord, pour ne pas laisser Feeder cadrer le champ. Puis Feeder, articles et newsletters du jour, pour l'apport propriétaire. Puis recherche ciblée pour recouper.
+
+Feeder est une matière première, pas un sommaire. On n'y résume pas les items un par un.
+
+Point de vigilance : une tâche planifiée tourne sans surveillance. Si la connexion OAuth demande une réautorisation, elle échoue silencieusement. D'où l'alerte quotidienne.
 
 ## Les déclencheurs
 
@@ -168,9 +202,9 @@ Table `journal` en ajout seul, alimentée par un trigger Postgres sur les tables
 
 L'avantage du trigger : personne ne peut oublier de logger.
 
-Chaque agent a son propre rôle Postgres, cantonné à ce qu'il écrit. Le trigger capte l'identité de l'acteur sans que l'agent la déclare. Un agent ne peut pas mentir sur son identité. L'agent JONEO ne doit pas pouvoir écrire sous la signature d'Alain, et inversement.
+Chaque agent a son propre rôle Postgres, cantonné à ce qu'il écrit. Le veilleur écrit dans `actus` seulement. Le prospectif lit `actus` et écrit dans `signaux` seulement. Le trigger capte l'identité de l'acteur sans que l'agent la déclare. L'agent JONEO ne doit pas pouvoir écrire sous la signature d'Alain, et inversement.
 
-Alerte quotidienne : un select planifié qui cherche les lignes bloquées dans un statut intermédiaire depuis plusieurs heures.
+Alerte quotidienne : un select planifié qui cherche les lignes bloquées dans un statut intermédiaire depuis plusieurs heures, et qui vérifie qu'une actu a bien été écrite dans les dernières vingt-quatre heures.
 
 Ce triptyque reprend les principes de sécurité des agents publiés par Google : contrôleur humain, pouvoirs limités, actions observables.
 
@@ -202,15 +236,15 @@ Aucun identifiant en dur dans un module Make. Si un scénario contient une chaî
 
 Le module Supabase de Make expose douze modules, dont `searchRows`, `createARow`, `upsertARecord`, `deleteRows`, `getRowsCount` et `makeAnApiCall`. Il existe un trigger natif `watchEvents`.
 
-Il n'y a pas de module de mise à jour simple, seulement `upsertARecord`. Reste à vérifier s'il préserve les colonnes non renseignées. Point structurant, puisque chaque étape ne modifie qu'un champ.
+Il n'y a pas de module de mise à jour simple, seulement `upsertARecord`, qui impose de renseigner tous les champs. **Pour toute mise à jour partielle, utiliser `Make an API Call` en PATCH** sur `/rest/v1/<table>?id=eq.<uuid>`, avec l'en-tête `Prefer: return=representation`. Le `eq.` est obligatoire : sans lui, PostgREST refuse la requête.
 
-Le MCP Supabase fonctionne avec des permissions de développeur. Supabase recommande de ne pas l'exposer à des utilisateurs finaux et de privilégier le mode lecture seule pour les routines non supervisées. Conséquence : l'agent éditorial lit par ce canal, il n'écrit pas par ce canal.
-
-Aucun module vectoriel dans Make. La recherche de similarité passe par une fonction SQL en base, appelée via `makeAnApiCall`. Il faut un fournisseur d'embeddings tiers, Anthropic n'en propose pas.
+Le MCP Supabase fonctionne avec des permissions de développeur. Supabase recommande de ne pas l'exposer à des utilisateurs finaux et de privilégier le mode lecture seule pour les routines non supervisées. Arbitrage retenu : les agents de veille écrivent par ce canal, l'accès étant celui d'Alain sur sa propre base.
 
 Une app Make expose `Execute inline Python Code`, `Generate PNG (from HTML)` et `Run Puppeteer`. Profil correspondant à 0CodeKit, déjà utilisé pour le merge audio. À confirmer.
 
 Directus Cloud n'accepte pas de base externe. Confirmé par la documentation Supabase et par la communauté Directus.
+
+Feeder expose un serveur MCP hébergé, inclus sur les plans Plus, Professional et Enterprise. Sur un compte gratuit, la connexion fonctionne mais les appels d'outils demandent une mise à niveau.
 
 ## Outils supprimés
 
@@ -218,14 +252,14 @@ Dust, Notion, Bannerbear. Plus de 1000 euros par an et trois dépendances en moi
 
 Les covers d'épisodes sont supprimées. Une image Open Graph statique par format suffit pour le partage.
 
+La table de dédoublonnage, le calcul d'embeddings et la fonction de similarité pgvector, devenus inutiles depuis que la veille est faite par un agent conversationnel et non par un collecteur mécanique. Une dépendance de moins : plus besoin de fournisseur d'embeddings.
+
 ## Ce qui reste à faire
 
-Le schéma SQL, à confronter au premier jet présent dans `joneo-supabase`.
-
-Trancher qui écrit les signaux déduits : le veilleur quotidien ou un agent d'exploitation.
+Le schéma SQL complet, à confronter au premier jet présent dans `joneo-supabase`.
 
 Le périmètre de lancement : quels formats sortent, lesquels attendent.
 
-La première chaîne de bout en bout, sur `actus`, avec le veilleur et le rédacteur.
+La première chaîne de bout en bout, sur `actus`, avec le veilleur et la publication Ghost.
 
 Le catalogue d'agents et le fichier de contraintes techniques, à écrire au fur et à mesure de la construction.
